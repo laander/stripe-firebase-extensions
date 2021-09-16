@@ -22,4 +22,4 @@ export {
   getStripePayments,
 } from "./init";
 
-export { Product, Price, getProduct } from "./product";
+export { Product, Price, getProduct, getPrice } from "./product";

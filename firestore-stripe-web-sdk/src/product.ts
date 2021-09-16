@@ -17,9 +17,10 @@
 import { FirebaseApp } from "@firebase/app";
 import {
   doc,
-  DocumentSnapshot,
+  DocumentData,
   getDoc,
   getFirestore,
+  QueryDocumentSnapshot,
 } from "@firebase/firestore";
 import { StripePayments, StripePaymentsError } from "./init";
 import { checkNonEmptyString, checkStripePayments } from "./utils";
@@ -158,6 +159,30 @@ export async function getProduct(
 }
 
 /**
+ * Retrieves a Stripe price from the database.
+ *
+ * @param payments - A valid {@link StripePayments} object.
+ * @param productId - ID of the product to which the price belongs.
+ * @param priceId - ID of the price to retrieve.
+ * @returns Resolves with a Stripe Price object if found. Rejects if the specified
+ *   product ID or the price ID does not exist.
+ */
+export async function getPrice(
+  payments: StripePayments,
+  productId: string,
+  priceId: string
+): Promise<Price> {
+  checkStripePayments(
+    payments,
+    "payments must be a valid StripePayments instance."
+  );
+  checkNonEmptyString(productId, "productId must be a non-empty string.");
+  checkNonEmptyString(priceId, "priceId must be a non-empty string.");
+  const dao: ProductDAO = getOrInitProductDAO(payments);
+  return await dao.getPrice(productId, priceId);
+}
+
+/**
  * Internal interface for all database interactions pertaining to Stripe products. Exported
  * for testing.
  *
@@ -165,6 +190,7 @@ export async function getProduct(
  */
 export interface ProductDAO {
   getProduct(productId: string): Promise<Product>;
+  getPrice(productId: string, priceId: string): Promise<Price>;
 }
 
 class FirestoreProductDAO implements ProductDAO {
@@ -174,22 +200,57 @@ class FirestoreProductDAO implements ProductDAO {
   ) {}
 
   public async getProduct(productId: string): Promise<Product> {
-    const productSnap = await this.queryProduct(productId);
-    if (productSnap.exists()) {
-      return { ...(productSnap.data() as Product), id: productId, prices: [] };
-    }
-
-    throw new StripePaymentsError(
-      "not-found",
-      `No product found with the ID: ${productId}`
-    );
+    const snap = await this.getProductSnapshotIfExists(productId);
+    return productFromSnapshot(snap);
   }
 
-  private async queryProduct(productId: string): Promise<DocumentSnapshot> {
+  public async getPrice(productId: string, priceId: string): Promise<Price> {
+    const snap = await this.getPriceSnapshotIfExists(productId, priceId);
+    return priceFromSnapshot(snap);
+  }
+
+  private async getProductSnapshotIfExists(
+    productId: string
+  ): Promise<QueryDocumentSnapshot> {
     const firestore = getFirestore(this.app);
     const productRef = doc(firestore, this.productsCollection, productId);
+    const snapshot = await this.queryFirestore(() => getDoc(productRef));
+    if (!snapshot.exists()) {
+      throw new StripePaymentsError(
+        "not-found",
+        `No product found with the ID: ${productId}`
+      );
+    }
+
+    return snapshot;
+  }
+
+  private async getPriceSnapshotIfExists(
+    productId: string,
+    priceId: string
+  ): Promise<QueryDocumentSnapshot> {
+    const firestore = getFirestore(this.app);
+    const priceRef = doc(
+      firestore,
+      this.productsCollection,
+      productId,
+      "prices",
+      priceId
+    );
+    const snapshot = await this.queryFirestore(() => getDoc(priceRef));
+    if (!snapshot.exists()) {
+      throw new StripePaymentsError(
+        "not-found",
+        `No price found with the product ID: ${productId} and price ID: ${priceId}`
+      );
+    }
+
+    return snapshot;
+  }
+
+  private async queryFirestore<T>(fn: () => Promise<T>): Promise<T> {
     try {
-      return await getDoc(productRef);
+      return await fn();
     } catch (error) {
       throw new StripePaymentsError(
         "internal",
@@ -198,6 +259,26 @@ class FirestoreProductDAO implements ProductDAO {
       );
     }
   }
+}
+
+function productFromSnapshot(snap: QueryDocumentSnapshot): Product {
+  return {
+    ...(snap.data() as Product),
+    id: snap.id,
+    prices: [],
+  };
+}
+
+function priceFromSnapshot(snap: QueryDocumentSnapshot): Price {
+  const data: DocumentData = snap.data();
+  return {
+    ...(data as Price),
+    id: snap.id,
+    productId: snap.ref.parent.parent!.id,
+    intervalCount: data.interval_count,
+    trialPeriodDays: data.trial_period_days,
+    unitAmount: data.unit_amount,
+  };
 }
 
 const PRODUCT_DAO_KEY = "product-dao" as const;
